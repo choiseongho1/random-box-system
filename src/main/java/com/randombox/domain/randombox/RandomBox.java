@@ -74,4 +74,9 @@ public class RandomBox {
         LocalDateTime now = LocalDateTime.now();
         return now.isAfter(salesStartTime) && now.isBefore(salesEndTime) && quantity > 0;
     }
+
+    public void updateQuantity(int newQuantity) {
+        this.quantity = newQuantity;
+        this.updatedAt = LocalDateTime.now();
+    }
 }

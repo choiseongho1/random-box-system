@@ -3,13 +3,18 @@ package com.randombox.domain.purchase;
 import com.randombox.domain.coupon.Coupon;
 import com.randombox.domain.coupon.UserCoupon;
 import com.randombox.domain.coupon.UserCouponRepository;
+import com.randombox.domain.notification.Notification;
+import com.randombox.domain.notification.NotificationService;
+import com.randombox.domain.queue.QueueService;
 import com.randombox.domain.randombox.RandomBox;
+import com.randombox.domain.randombox.RandomBoxInventoryService;
 import com.randombox.domain.randombox.RandomBoxItem;
 import com.randombox.domain.randombox.RandomBoxRepository;
 import com.randombox.domain.randombox.RandomBoxService;
 import com.randombox.domain.user.User;
 import com.randombox.domain.user.UserRepository;
 import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -17,6 +22,7 @@ import java.time.LocalDateTime;
 import java.util.ArrayList;
 import java.util.List;
 
+@Slf4j
 @Service
 @RequiredArgsConstructor
 @Transactional(readOnly = true)
@@ -28,6 +34,56 @@ public class PurchaseService {
     private final UserRepository userRepository;
     private final RandomBoxService randomBoxService;
     private final UserCouponRepository userCouponRepository;
+    private final RandomBoxInventoryService randomBoxInventoryService;
+    private final QueueService queueService;
+    private final NotificationService notificationService;
+
+    /**
+     * 랜덤박스 구매 전 대기열 확인
+     * @param userId 사용자 ID
+     * @param randomBoxId 랜덤박스 ID
+     * @return 대기열 위치 (0이면 바로 구매 가능)
+     */
+    public int checkQueuePosition(Long userId, Long randomBoxId) {
+        // 대기열에서 사용자 위치 확인
+        int position = queueService.getPosition(randomBoxId, userId);
+        
+        // 대기열에 없으면 추가
+        if (position == -1) {
+            position = queueService.addToQueue(randomBoxId, userId);
+        }
+        
+        // 첫 번째 위치면 바로 구매 가능
+        if (position == 0) {
+            return 0;
+        }
+        
+        // 대기열 위치 반환
+        return position;
+    }
+    
+    /**
+     * 랜덤박스 구매 준비 (대기열 첫 번째 사용자에게 알림)
+     * @param randomBoxId 랜덤박스 ID
+     * @return 구매 가능한 사용자 ID
+     */
+    public Long prepareForPurchase(Long randomBoxId) {
+        // 대기열에서 다음 사용자 가져오기
+        Long userId = queueService.getNextUser(randomBoxId);
+        
+        if (userId != null) {
+            // 랜덤박스 정보 조회
+            RandomBox randomBox = randomBoxRepository.findById(randomBoxId)
+                    .orElseThrow(() -> new IllegalArgumentException("존재하지 않는 랜덤박스입니다."));
+            
+            // 구매 준비 알림 전송
+            notificationService.sendQueueReadyNotification(userId, randomBox.getName());
+            
+            log.info("사용자 {}에게 랜덤박스 {} 구매 준비 알림을 전송했습니다.", userId, randomBoxId);
+        }
+        
+        return userId;
+    }
 
     @Transactional
     public Purchase purchaseRandomBox(Long userId, Long randomBoxId, int quantity, Long userCouponId) {
@@ -40,6 +96,12 @@ public class PurchaseService {
         if (!randomBox.isOnSale()) {
             throw new IllegalStateException("현재 판매 중인 랜덤박스가 아닙니다.");
         }
+        
+        // Redis에서 재고 확인 및 감소
+        boolean inventoryDecreased = randomBoxInventoryService.decreaseInventory(randomBoxId, quantity);
+        if (!inventoryDecreased) {
+            throw new IllegalStateException("재고가 부족하거나 재고 감소에 실패했습니다.");
+        }
 
         int totalPrice = randomBox.getPrice() * quantity;
         
@@ -49,19 +111,27 @@ public class PurchaseService {
                     .orElseThrow(() -> new IllegalArgumentException("존재하지 않는 쿠폰입니다."));
             
             if (userCoupon.isUsed()) {
+                // 재고 복구
+                randomBoxInventoryService.increaseInventory(randomBoxId, quantity);
                 throw new IllegalStateException("이미 사용된 쿠폰입니다.");
             }
             
             if (!userCoupon.getUser().getId().equals(userId)) {
+                // 재고 복구
+                randomBoxInventoryService.increaseInventory(randomBoxId, quantity);
                 throw new IllegalArgumentException("해당 쿠폰을 사용할 권한이 없습니다.");
             }
             
             Coupon coupon = userCoupon.getCoupon();
             if (!coupon.isValid()) {
+                // 재고 복구
+                randomBoxInventoryService.increaseInventory(randomBoxId, quantity);
                 throw new IllegalStateException("유효하지 않은 쿠폰입니다.");
             }
             
             if (coupon.getMinPurchase() != null && totalPrice < coupon.getMinPurchase()) {
+                // 재고 복구
+                randomBoxInventoryService.increaseInventory(randomBoxId, quantity);
                 throw new IllegalStateException("최소 구매 금액을 만족하지 않습니다.");
             }
             
@@ -71,6 +141,7 @@ public class PurchaseService {
             userCoupon.use();
         }
 
+        // 데이터베이스 재고 감소 (Redis와 동기화 용도)
         randomBox.decreaseQuantity(quantity);
 
         Purchase purchase = Purchase.builder()
@@ -91,7 +162,12 @@ public class PurchaseService {
                     .randomBoxItem(randomItem)
                     .build();
             results.add(purchaseResultRepository.save(result));
+            
+            // 구매 성공 알림 전송
+            notificationService.sendPurchaseSuccessNotification(userId, randomBox.getName(), randomItem.getName());
         }
+        
+        log.info("사용자 {}가 랜덤박스 {}를 {}개 구매했습니다. 총 가격: {}", userId, randomBoxId, quantity, totalPrice);
 
         return savedPurchase;
     }
@@ -132,8 +208,11 @@ public class PurchaseService {
 
         purchase.cancel();
         
-        // 랜덤박스 수량 복구
+        // 랜덤박스 수량 복구 (Redis와 DB 모두 업데이트)
         RandomBox randomBox = purchase.getRandomBox();
+        randomBoxInventoryService.increaseInventory(randomBox.getId(), purchase.getQuantity());
+        
+        // DB 재고 복구 (Redis와 동기화 용도)
         randomBox.update(
                 randomBox.getName(),
                 randomBox.getDescription(),
@@ -142,6 +221,9 @@ public class PurchaseService {
                 randomBox.getSalesStartTime(),
                 randomBox.getSalesEndTime()
         );
+        
+        log.info("사용자 {}의 구매 {}가 취소되었습니다. 랜덤박스 {}의 재고가 {}개 복구되었습니다.", 
+                userId, purchaseId, randomBox.getId(), purchase.getQuantity());
 
         return purchase;
     }
