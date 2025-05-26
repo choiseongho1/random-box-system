@@ -21,7 +21,7 @@ public class SecurityConfig {
                 .requestMatchers("/api/v1/users/signup", "/api/v1/users/login", "/h2-console/**").permitAll()
                 .anyRequest().authenticated()
             )
-            .headers(headers -> headers.frameOptions().disable());
+            .headers(headers -> headers.frameOptions(frameOptions -> frameOptions.disable()));
 
         return http.build();
     }

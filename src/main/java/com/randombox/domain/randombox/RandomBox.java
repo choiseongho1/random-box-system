@@ -1,4 +1,4 @@
-package com.randombox.domain.ticket;
+package com.randombox.domain.randombox;
 
 import jakarta.persistence.*;
 import lombok.AccessLevel;
@@ -9,10 +9,10 @@ import lombok.NoArgsConstructor;
 import java.time.LocalDateTime;
 
 @Entity
-@Table(name = "tickets")
+@Table(name = "random_boxes")
 @Getter
 @NoArgsConstructor(access = AccessLevel.PROTECTED)
-public class Ticket {
+public class RandomBox {
 
     @Id
     @GeneratedValue(strategy = GenerationType.IDENTITY)
@@ -31,12 +31,6 @@ public class Ticket {
     private Integer quantity;
 
     @Column(nullable = false)
-    private LocalDateTime eventDateTime;
-
-    @Column(nullable = false)
-    private String venue;
-
-    @Column(nullable = false)
     private LocalDateTime salesStartTime;
 
     @Column(nullable = false)
@@ -46,44 +40,38 @@ public class Ticket {
     private LocalDateTime updatedAt;
 
     @Builder
-    public Ticket(String name, String description, Integer price, Integer quantity,
-                 LocalDateTime eventDateTime, String venue,
-                 LocalDateTime salesStartTime, LocalDateTime salesEndTime) {
+    public RandomBox(String name, String description, Integer price, Integer quantity,
+                    LocalDateTime salesStartTime, LocalDateTime salesEndTime) {
         this.name = name;
         this.description = description;
         this.price = price;
         this.quantity = quantity;
-        this.eventDateTime = eventDateTime;
-        this.venue = venue;
         this.salesStartTime = salesStartTime;
         this.salesEndTime = salesEndTime;
         this.createdAt = LocalDateTime.now();
     }
 
     public void update(String name, String description, Integer price, Integer quantity,
-                      LocalDateTime eventDateTime, String venue,
                       LocalDateTime salesStartTime, LocalDateTime salesEndTime) {
         this.name = name;
         this.description = description;
         this.price = price;
         this.quantity = quantity;
-        this.eventDateTime = eventDateTime;
-        this.venue = venue;
         this.salesStartTime = salesStartTime;
         this.salesEndTime = salesEndTime;
         this.updatedAt = LocalDateTime.now();
     }
 
-    public void decreaseQuantity() {
-        if (this.quantity <= 0) {
-            throw new IllegalStateException("티켓이 모두 소진되었습니다.");
+    public void decreaseQuantity(int amount) {
+        if (this.quantity < amount) {
+            throw new IllegalStateException("재고가 부족합니다.");
         }
-        this.quantity--;
+        this.quantity -= amount;
         this.updatedAt = LocalDateTime.now();
     }
 
     public boolean isOnSale() {
         LocalDateTime now = LocalDateTime.now();
-        return now.isAfter(salesStartTime) && now.isBefore(salesEndTime);
+        return now.isAfter(salesStartTime) && now.isBefore(salesEndTime) && quantity > 0;
     }
 }
